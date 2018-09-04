@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1535490085077.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "26895816",
+    "id" : "90F8C14E",
+    "lastKnownWriteTime" : 1535587854,
+    "last_content_update" : 1535587854824,
+    "path" : "~/Desktop/Github/Test_Package/local_prep.R",
+    "project_path" : "local_prep.R",
+    "properties" : {
+        "cursorPosition" : "4,0",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

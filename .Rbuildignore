@@ -1,0 +1,3 @@
+^.*\.Rproj$
+^.local_prep\.R$
+^\.Rproj\.user$

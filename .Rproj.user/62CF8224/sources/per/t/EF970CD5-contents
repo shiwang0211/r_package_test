@@ -1,0 +1,61 @@
+Package: testtest
+Type: Package
+Title: What the Package Does (Title Case)
+Version: 0.1.0
+Author: Who wrote it
+Maintainer: The package maintainer <yourself@somewhere.net>
+Description: More about what it does (maybe more than one line)
+    Use four spaces when indenting paragraphs within the Description.
+License: What license is it under?
+Encoding: UTF-8
+LazyData: true
+LinkingTo: 
+Imports:
+    dplyr,
+    car,
+    readxl,
+    openxlsx,
+    knitr,
+    rmarkdown,
+    pander,
+    reshape2,
+    markdown,
+    stargazer,
+    stats,
+    seasonal,
+    mondate,
+    KFKSDS,
+    glmnetUtils,
+    plotROC,
+    TSA,
+    ResourceSelection,
+    tseries,
+    stringr,
+    data.table,
+    gdata,
+    nortest,
+    het.test,
+    DataCombine,
+    stsm,
+    leaps,
+    zoo,
+    ggplot2,
+    egcm,
+    lmtest,
+    fma,
+    itsmr,
+    plyr,
+    quantreg,
+    MASS,
+    dynlm,
+    quantmod,
+    forecast,
+    aTSA,
+    AER,
+    PerformanceAnalytics,
+    tidyr,
+    BaylorEdPsych,
+    tsoutliers,
+    scales,
+    FinTS,
+    chron

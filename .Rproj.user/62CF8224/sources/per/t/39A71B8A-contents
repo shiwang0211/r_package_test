@@ -1,0 +1,726 @@
+---
+title: "Model report with test results"
+author: "KPMG"
+output:
+  word_document: default
+  pdf_document:
+    keep_tex: yes
+  html_document: default
+
+---
+
+
+```{r options, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, fig.path = "figure/")
+
+#library(pander)
+#require(markdown)
+#library(dplyr)
+#library(reshape2)
+panderOptions('digits', 3)
+panderOptions('round', 3)
+panderOptions('keep.trailing.zeros', TRUE)
+options(scipen = 1, digits = 3)
+
+## output master file
+OUTPUT_MASTER_FILE = "output/updated_master_file.csv"
+ERR = paste0("../../../",ERR)
+
+## global setting
+TEST = FALSE
+set.seed(7)
+
+## codes for super model
+source("../arima_wrapper.R") # include "arima_wrapper".
+source("../ECM_fns.R") # required for ecm model, include "fit_ecm", and "predict_ecm". 
+source("../supermodel.R") # include "supermodel", "scenario_analysis" and "sensitivity", etc
+
+## codes for markdown
+source("../read_in_data.R") # include "read_in_data".
+source("helper_fns.R") # all diagnostic tests called by markdown(supermodel as input)
+source("integrity_check.R") # WS: added
+
+```
+
+
+```{r data_readin, include=FALSE}
+  
+comma_split <- function(x) { 
+  v = trimws(unlist(strsplit(x, ","))) 
+  return(v[v!=""])}
+
+tryCatch({
+  
+# assign "historical"
+if (is.na(user_input$historical_data_csv)){ # read from excel sheet "historical_sheet_name"
+  data_input_filepath = paste0("../../../Input/", user_input$data)
+  historical_sheet_name = comma_split(user_input$historical_sheet_name)
+  historical = read_in_data(path = data_input_filepath, sheet = historical_sheet_name[1], guess_max = Inf) # already sorted by date
+  
+} else { # read from separate csv files as specified in "historical_data_csv"
+  file_names = comma_split(user_input$historical_data_csv)
+  data_input_filepathes = paste0("../../../Input/", file_names)
+  for (data_input_filepath in data_input_filepathes){
+    tmp = read_in_data(path = data_input_filepath) 
+    if (exists("historical")) 
+      historical = rbind(historical, tmp)
+    else
+      historical = tmp
+  }
+}
+
+# read scenario names
+data_input_filepath = paste0("../../../Input/", user_input$data)
+scenario_sheet_names = comma_split(user_input$scenario_sheet_names)
+HAS_SCENARIO = ifelse(length(scenario_sheet_names) > 0, TRUE, FALSE)  
+
+# assign scenario data is there is scenario names specified
+if(HAS_SCENARIO){
+  for (scenario_sheet_name in scenario_sheet_names)
+    assign(scenario_sheet_name, read_in_data(path = data_input_filepath, sheet = scenario_sheet_name)) # already sorted by date
+    first_scenario = eval(parse(text =  scenario_sheet_names[1]))
+}
+
+},  error = function(e) {
+  msg = paste0("Fail to read in data file; Confirm data file path to be \"", user_input$data, "\" with sheets name as provided in the user setting file, and date format is correct")
+  write(msg, ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+})
+  
+
+  
+## inputs for champion model
+model_type1 <<- user_input$model_type1
+formula_raw1 <<- user_input$formula1
+options_raw1 <<- eval(parse(text=user_input$options_raw1))
+
+## inputs for benchmark model
+if(is.na(user_input$model_type2)) model_type2 <<- model_type1 else model_type2 <<- user_input$model_type2
+formula_raw2 <<- user_input$formula2
+options_raw2 <<- eval(parse(text=user_input$options_raw2))
+
+## For weighted ols:
+if('weight_column_name' %in% names(options_raw1)) {
+  weight_column_name1 <<- options_raw1$weight_column_name
+  options_raw1$weight_column_name <- NULL
+} else {
+  weight_column_name1 <<- FALSE
+}
+
+if('weight_column_name' %in% names(options_raw2)) {
+  weight_column_name2 <<- options_raw2$weight_column_name
+  options_raw2$weight_column_name <- NULL
+} else {
+  weight_column_name2 <<- FALSE
+}
+
+# method_analytical equation 
+method_analytical <<- user_input$analytical_formula # the user input equation for aanlytical components
+
+```
+
+```{r factorize, include=FALSE}
+# helper function to turn input comma-separated list into vector
+tryCatch({
+
+
+## In case there is cate_variables, factorzie them
+if (!is.null(user_input$cate_variables) & !is.na(user_input$cate_variables)){
+  for (cate_variable in comma_split(user_input$cate_variables)){
+    historical[[cate_variable]] = as.factor(historical[[cate_variable]])
+    levels_ = levels(historical[[cate_variable]])
+    if(HAS_SCENARIO){
+      for (scenario_sheet_name in scenario_sheet_names){
+        s = eval(parse(text = scenario_sheet_name))
+        s[[cate_variable]] = factor(s[[cate_variable]] ,levels = levels_)
+        assign(scenario_sheet_name, s)
+      }
+    }
+  }
+}
+
+},  error = function(e) {
+  msg = paste0("Confirm that the input for categorical variables is correct.")
+  write(msg, ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+})
+
+```
+
+```{r filter_by_date, include=FALSE}
+tryCatch({
+  
+if(!is.na(user_input$mindate)){
+  filtered_historical = data_filter(historical, user_input$mindate) # simple filter based on mindate; all t >= T
+  # includes lag. e.g., lag=2, then include T-2, T-1, T, T+1 .....
+  historical1 = date_filter_withlag(historical, user_input$mindate, formula_raw1) 
+  # includes lag. e.g., lag=2, then include T-2, T-1, T, T+1 .....
+  historical2 = date_filter_withlag(historical, user_input$mindate, formula_raw2)  
+} else {
+  historical1 = historical2 = filtered_historical = historical # if no date constraint, then include entire dataset
+}
+  
+},  error = function(e) {
+  msg = paste0("Check \"mindate\" input and model formula to ensuremin the correct setting for starting date and variable lags")
+  write(msg, ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+})
+```
+
+```{r integrity_check, include=FALSE}
+tryCatch({
+  
+integrity_check_results = integrity_check(filtered_historical, formula_raw1, formula_raw2, method_analytical)
+
+},  error = function(e) {
+  msg = paste0("Confirm that the variable names specified in formulas are correct")
+  write(msg, ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+})
+```
+
+```{r backtest_scenario_period, include=FALSE}
+# recalculate `backtest_num_quarters` and `scen_num_quarters`
+freq = integrity_check_results$date_summary$date_interval
+if (freq == "other"){
+   write("Only supports quarterly and monthly data. Please modify time frequency of input data.", ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+}
+
+tryCatch({
+  new_backtest_num_quarters <- recalculate_back_quater(historical, freq)
+  if(HAS_SCENARIO) new_scen_num_quarters <- recalculate_scenario_quater(first_scenario, freq)
+
+},  error = function(e) {
+  msg = paste0("Confirm that first column in data file is Date format")
+  write(msg, ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+})
+
+# update user_input params
+user_input$backtest_num_quarters = new_backtest_num_quarters
+if(HAS_SCENARIO) user_input$scen_num_quarters = new_scen_num_quarters
+
+if(user_input$backtest_num_quarters >= nrow(historical)) {
+  msg = paste0("Confirm that the settings for \"backtest_holdout_period\" is correct")
+  write(msg, ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+}
+
+# get subset of scenario data
+if(HAS_SCENARIO){
+  for (scenario_sheet_name in scenario_sheet_names)
+  assign(scenario_sheet_name,eval(parse(text = scenario_sheet_name))[1:user_input$scen_num_quarters, ])
+}
+
+```
+
+
+```{r fill_na_values, include=FALSE}
+## WS: added for continous and character
+if (user_input$na_action == "Fill with Mean"){
+  historical1[] <- lapply(historical1, fillna)
+  historical2[] <- lapply(historical2, fillna)
+}
+
+```
+
+
+
+```{r run_model, include=FALSE}
+tryCatch({
+  
+# Model for back_testing (with "backtest_num_quarters" as hold-out samples)
+s11_back <<- supermodel(model_type = model_type1, 
+                   formula_raw = formula_raw1, 
+                   options_raw = options_raw1,
+                   data_df = head(historical1, nrow(historical1) - user_input$backtest_num_quarters), 
+                   weight_column_name = weight_column_name1,
+                   method_analytical = method_analytical, 
+                   new_data_df = tail(historical1, user_input$backtest_num_quarters)
+)
+
+s22_back <<- supermodel(model_type = model_type2, 
+                   formula_raw = formula_raw2, 
+                   options_raw = options_raw2,
+                   data_df = head(historical2, nrow(historical2) - user_input$backtest_num_quarters), 
+                   method_analytical = method_analytical, 
+                   weight_column_name = weight_column_name2, 
+                   new_data_df = tail(historical2, user_input$backtest_num_quarters)
+)
+              
+# Full Model with entire historical dataset                   
+s11 <<- supermodel(model_type = model_type1, 
+                   formula_raw = formula_raw1, 
+                   options_raw = options_raw1,
+                   data_df = historical1, 
+                   weight_column_name = weight_column_name1,
+                   method_analytical = method_analytical, 
+                   new_data_df = NULL
+)
+
+s22 <<- supermodel(model_type = model_type2, 
+                   formula_raw = formula_raw2, 
+                   options_raw = options_raw2,
+                   data_df = historical2, 
+                   method_analytical = method_analytical, 
+                   weight_column_name = weight_column_name2, 
+                   new_data_df = NULL                  
+)
+    
+},  error = function(e) {
+  msg = paste0("Error in running model")
+  write(msg, ERR, append = FALSE)
+  stop(msg, call. = FALSE)
+})    
+```
+
+
+```{r diagnostics_setup, echo=FALSE}
+
+# list of possible test_types
+test_types <- test_master_list %>% .$type %>% unique %>% as.character
+test_types <- test_types[!is.na(test_types)]
+
+# remove non-diagnostic tests from this list...
+test_types <- test_types[!(test_types %in% c('Model Fit', 'Scenario Analysis', 'Benchmark Analysis', 
+                                             'BackTesting', 'Coefficient Sensitivities', 
+                                             'Data Sensitivities','Integrity Check'))]
+
+# helper function to insert dynamic variables into text 
+dynamic_replace <- function(x, out) {
+  x <- unlist(strsplit(x, split = "**", fixed = TRUE))
+  paste0(sapply(x, function(x) { if(x %in% names(out)) paste0(unlist(out[x]), collapse = " ") else paste0(x) }), collapse = "")
+}
+
+
+```
+
+
+```{r summary of integrity check, echo=FALSE, results='asis'}
+cat('#', '1 Executive Summary', '\n')
+cat('###', '1.1 Background', '\n')
+cat('###', '1.2 Roles and Responsibilities', '\n')
+cat('###', '1.3 Model Description', '\n')
+
+cat('#', '2 Model Selection and Development Decision ', '\n')
+cat('###', '2.1 Model Use', '\n')
+cat('###', '2.2 Model Development and Implementation', '\n')
+cat('###', '2.3 Model Governance', '\n')
+cat('###', '2.4 Potential Alternative Approaches and Decision Criteria', '\n')
+
+cat('#', '3 Model Development and Implementation', '\n')
+cat('###', '3.1 Input Data', '\n')
+cat('###', '3.2 Assumptions', '\n')
+cat('###', '3.3 Parameter Estimation ', '\n')
+cat('###', '3.4 Implementation Overview and Process Flow', '\n')
+cat('###', '3.5 Programming / Coding', '\n')
+
+cat('#','4 Developmental Validation & Testing', '\n')
+cat('###', '4.1 Qualitative Validation', '\n')
+cat('###', '4.X Integrity Check (TBD)', '\n')
+cat('\n \n')
+try(cat(sub_list <- test_master_list %>% filter(function_name == "integrity_check"),"\n"), silent = TRUE)
+cat(sub_list$describe)
+cat('\n \n')
+cat("There are ",integrity_check_results$num_records, " data records, ", integrity_check_results$na_records, " of which contain NA values","\n")
+try(cat(pander(integrity_check_results$date_summary)), silent = TRUE)
+cat('\n \n')
+try(cat(pander(integrity_check_results$continous_summary)), silent = TRUE)
+cat('\n \n')
+try(for (i in length(integrity_check_results$categorical_summary))
+  cat(pander(integrity_check_results$categorical_summary[[i]])), silent = TRUE)
+cat('\n \n')
+```
+
+```{r summary of fitted model, echo=FALSE, results='asis'}
+cat('###', '4.2 Implementation Test', '\n')
+
+sub_list <- test_master_list %>% filter(function_name == "model_fit")
+out <- suppressWarnings(try(eval(parse(text = paste0(sub_list$function_name, '(s11, significance = ', 
+                                                     sub_list$significance, ')'))), silent = FALSE))
+# helper function to insert output back into master file
+master_row <- which(test_master_list$function_name == sub_list$function_name)
+for(k in 1:length(out)) test_master_list[master_row, names(out[k])] <- paste0(unlist(out[k]), collapse = " ")
+
+if(nrow(sub_list) == 1) {
+
+  try(cat(dynamic_replace(sub_list$describe, test_master_list[master_row, ])), silent = FALSE)
+  cat('\n', 'The model equation is given by:', '\n')
+  cat('\n', 'Dependent Variable:', s11$formula_parsed$dep_var, '\n')
+  cat('\n', 'Independent Variable(s):', paste0(s11$formula_parsed$indep_vars, collapse = ', '), '\n')
+  cat('\n')
+  try(suppressWarnings(suppressMessages(cat(summary.supermodel(s11)))), silent = TRUE)
+  cat('\n \n')
+  try(if(out$PorF == "Pass") cat(dynamic_replace(sub_list$comment_pass, test_master_list[master_row, ])) 
+      else cat(dynamic_replace(sub_list$comment_fail, test_master_list[master_row, ])), silent = TRUE)
+
+} else {
+  cat('\n', 'Model fit output was not selected or is (currently) unavailable for this model!', '\n')
+}
+
+
+```
+
+
+
+```{r scenario_analysis, echo=FALSE, results='asis'}
+sub_list <- test_master_list %>% filter(function_name == "scenario_analysis")
+
+cat('###', '4.3 Scenario Analysis', '\n')
+cat('\n \n')
+try(cat(dynamic_replace(sub_list$describe, filter(test_master_list, function_name == 'user_input'))), silent = TRUE)
+cat('\n \n')
+
+if((nrow(sub_list) == 1)) {
+  
+    if (length(comma_split(user_input$all_scen_names))== 0){
+        msg = paste0("Please select at least one value for \"all_scen_names\" in user input, otherwise disable \"Scenario Analysis\"")
+        write(msg, ERR, append = FALSE)
+        stop(msg, call. = FALSE)
+    }
+        
+    results <- sensitivity(s11, type_names="coef", calc_names="multiply", method_names = c("model_index"), 
+                scen_names = comma_split(user_input$all_scen_names), shocks = 0)
+
+    results$rownames <- factor(as.character(results$rownames), unique(as.character(results$rownames)))
+    results_display <- acast(data = results, formula = rownames ~ scenario, fun.aggregate = mean, value.var = "values")
+    ## next line subsets scenario output by the FIRST number of quarters (scen_num_quarters) if it exists
+    # results_display <- results_display[1:min(nrow(results_display), user_input$scen_num_quarters, na.rm = TRUE), ]
+    try(cat(pander(results_display)), silent = TRUE)
+    cat('\n \n')
+} else {
+  cat('\n', 'Scenario analysis was not selected or is (currently) unavailable for this model!', '\n')
+}
+
+
+
+```
+
+
+
+```{r coefficient sensitivity, echo=FALSE, results='asis'}
+
+cat('###', '4.4 Sensitivity Analysis', '\n')
+
+sub_list <- test_master_list %>% filter(function_name == "coef_sensitivities")
+
+cat('\n \n')
+try(cat(dynamic_replace(sub_list$describe, filter(test_master_list, function_name == 'user_input'))), silent = TRUE)
+cat('\n \n')
+
+if(nrow(sub_list) == 1) {
+  
+  if (length(comma_split(user_input$coef_scen_names))== 0 | length(comma_split(user_input$coef_sensitivities))== 0 ){
+        msg = paste0("Please select at least one value for \"coef_scen_names\" and \"coef_sensitivities\" in user input, otherwise disable \"Coefficient Sensitivity Analysis\"")
+        write(msg, ERR, append = FALSE)
+        stop(msg, call. = FALSE)
+    }
+  
+  try({ results <- sensitivity(s11, type_names="coef", calc_names="multiply", method_names = c("model_index"), 
+                               scen_names = comma_split(user_input$coef_scen_names), 
+                               shocks = as.numeric(comma_split(user_input$coef_sensitivities)))
+  
+    for (name_ in unique(results$name)){
+      for (method_ in unique(results$method)){
+        try(temp_df <- acast(data = results[name_ == results[, "name"] & method_ == results[, "method"], ],
+                    formula = rownames ~ scenario + shock,
+                    fun.aggregate = mean,
+                    value.var = "values"))
+        try(cat(pander(temp_df,
+                    #temp_df[1:min(nrow(temp_df), user_input$scen_num_quarters, na.rm = TRUE), ],
+                    caption = sprintf("Coefficient: %s11, Prediction: %s11\n", name_, method_))), 
+                    silent = TRUE)
+      }
+    }
+  }, silent=TRUE)
+  
+} else {
+  cat('\n', 'Coefficient sensitivity analysis was not selected or is (currently) unavailable for this model!', '\n')
+}
+
+
+
+
+sub_list <- test_master_list %>% filter(function_name == "data_sensitivities")
+cat('\n \n')
+try(cat(dynamic_replace(sub_list$describe, filter(test_master_list, function_name == 'user_input'))), silent = TRUE)
+cat('\n \n')
+
+
+if(nrow(sub_list) == 1) {
+  
+    if (length(comma_split(user_input$data_scen_names))== 0 | length(comma_split(user_input$data_sensitivities))== 0 ){
+        msg = paste0("Please select at least one value for \"data_scen_names\" and \"data_sensitivities\" in user input, otherwise disable \"Data Sensitivity Analysis\"")
+        write(msg, ERR, append = FALSE)
+        stop(msg, call. = FALSE)
+    }
+
+try({
+results <- sensitivity(s11, type_names="data", calc_names="multiply", method_names = c("model_index"), 
+            scen_names = comma_split(user_input$data_scen_names), shocks = as.numeric(comma_split(user_input$data_sensitivities)))
+
+
+for (name_ in unique(results$name)){
+  for (method_ in unique(results$method)){
+    try(temp_df <- acast(data = results[name_ == results[, "name"] & method_ == results[, "method"], ],
+                formula = rownames ~ scenario + shock,
+                fun.aggregate = mean,
+                value.var = "values"))
+    try(cat(pander(temp_df,
+                #temp_df[1:min(nrow(temp_df), user_input$scen_num_quarters, na.rm = TRUE), ],
+                caption = sprintf("Data Variable: %s11, Prediction: %s11\n", name_, method_))), 
+                silent = TRUE)
+  }
+}
+}, silent=TRUE)
+  
+} else {
+  cat('\n', 'Data sensitivity analysis was not selected or is (currently) unavailable for this model!', '\n')
+}
+
+cat('\n \n')
+
+```
+
+
+
+```{r benchmark_analysis, echo=FALSE, results='asis'}
+cat('###', '4.5 Benchmark Analysis', '\n')
+
+sub_list <- test_master_list %>% 
+  dplyr:::filter(function_name %in% c("benchmark_main", "benchmark_mape", "benchmark_accuracy", "benchmark_scenario", "benchmark_auc"))
+
+if(nrow(sub_list) == 0) {
+  cat('\n', 'Benchmark analysis was not selected or is (currently) unavailable for this model!', '\n')
+} else {
+  if('benchmark_main' %in% sub_list$function_name) {
+
+    master_row <- which(test_master_list$function_name == 'benchmark_main')
+    sub_list_tmp <- dplyr:::filter(test_master_list, function_name == "benchmark_main")
+
+    out1 <- backtesting_qtr(s11_back, display_plot = FALSE)
+    out2 <- backtesting_qtr(s22_back, display_plot = FALSE)
+  
+    out <- merge(out1$table, out2$table, by= c('Date', 'Actual'))
+    colnames(out) <- c('Date', 'Actual', 'Champion', 'Challenger')
+    cat('\n \n')
+    try(cat(dynamic_replace(sub_list_tmp$describe, test_master_list[master_row, ])), silent = TRUE)
+    cat('\n \n')
+    try(cat(pander(out)), silent = TRUE)
+    p1 <- ggplot(out, aes(Date)) + 
+      geom_line(aes(y = Actual, colour = "Actual")) + 
+      geom_line(aes(y = Champion, colour = "Champion")) +
+      geom_line(aes(y = Challenger, colour = "Challenger"))
+    print(p1)
+  }
+    
+  if(any(sub_list$function_name %in% c("benchmark_mape", "benchmark_accuracy")))
+    cat('\\paragraph{Model Predictive Comparison}')
+    
+  if('benchmark_mape' %in% sub_list$function_name) {
+    master_row <- which(test_master_list$function_name == 'benchmark_mape')
+    sub_list_tmp <- dplyr:::filter(test_master_list, function_name == "benchmark_mape")
+    if(s11_back$model_type == 'ecm') m1 <- s11_back$model$Final_Model else m1 <- s11_back$model
+    if(s22_back$model_type == 'ecm') m2 <- s22_back$model$Final_Model else m2 <- s22_back$model
+    m1_mape <- tryCatch(round(mape(s11_back$model_get_yactuals(), s11_back$model_yhat()), 3), error = function(e) NULL)
+    m2_mape <- tryCatch(round(mape(s22_back$model_get_yactuals(), s22_back$model_yhat()), 3), error = function(e) NULL)
+    if(is.null(m1_mape) | is.null(m2_mape)) {
+      cat('\n At least one of the models cannot directly use MAPE!\n')
+    } else {
+      test_master_list[master_row, 'm1_mape'] <- m1_mape
+      test_master_list[master_row, 'm2_mape'] <- m2_mape
+      cat('\n \n')
+      try(cat(dynamic_replace(sub_list_tmp$describe, test_master_list[master_row, ])), silent = TRUE)
+      cat('\n \n')
+      if(m1_mape < m2_mape) {
+        cat(dynamic_replace(sub_list_tmp$comment_pass, test_master_list[master_row, ]))
+      } else if(m1_mape > m2_mape) {
+        cat(dynamic_replace(sub_list_tmp$comment_fail, test_master_list[master_row, ]))
+      } else {
+        cat(dynamic_replace(sub_list_tmp$comment_other, test_master_list[master_row, ]))
+      }
+      cat('\n \n')
+      }
+    }
+  
+  if('benchmark_accuracy' %in% sub_list$function_name) {
+    master_row <- which(test_master_list$function_name == 'benchmark_accuracy')
+    sub_list_tmp <- dplyr:::filter(test_master_list, function_name == "benchmark_accuracy")
+    m1_acc <- tryCatch(round(acc(s11_back$model_get_yactuals(), s11_back$model_yhat()), 3), error = function(e) NULL)
+    m2_acc <- tryCatch(round(acc(s22_back$model_get_yactuals(), s22_back$model_yhat()), 3), error = function(e) NULL)
+    if(is.null(m1_acc) | is.null(m2_acc)) {
+      cat('\n At least one of the models cannot directly use accuracy!\n')
+    } else {
+      test_master_list[master_row, 'm1_acc'] <- m1_acc
+      test_master_list[master_row, 'm2_acc'] <- m2_acc
+      cat('\n \n')
+      try(cat(dynamic_replace(sub_list_tmp$describe, test_master_list[master_row, ])), silent = TRUE)
+      cat('\n \n')
+      if(m1_acc > m2_acc) {
+        cat(dynamic_replace(sub_list_tmp$comment_pass, test_master_list[master_row, ]))
+      } else if(m1_acc < m2_acc) {
+        cat(dynamic_replace(sub_list_tmp$comment_fail, test_master_list[master_row, ]))
+      } else {
+        cat(dynamic_replace(sub_list_tmp$comment_other, test_master_list[master_row, ]))
+      }
+      cat('\n \n')
+      }
+  }
+  
+  if('benchmark_auc' %in% sub_list$function_name) {
+    master_row <- which(test_master_list$function_name == 'benchmark_auc')
+    sub_list_tmp <- dplyr:::filter(test_master_list, function_name == "benchmark_auc")
+    m1_auc <- tryCatch(round(roc_auc(s11_back$model_get_yactuals(), 
+                                 s11_back$model_yhat(p = s11_back$model_predict(return_prob = TRUE)))$AUC, 2), error = function(e) NULL)
+    m2_auc <- tryCatch(round(roc_auc(s22_back$model_get_yactuals(), 
+                                 s22_back$model_yhat(p = s22_back$model_predict(return_prob = TRUE)))$AUC, 2), error = function(e) NULL)
+    if(is.null(m1_auc) | is.null(m2_auc)) {
+      cat('\n At least one of the models cannot directly use AUC!\n')
+    } else {
+      test_master_list[master_row, 'm1_auc'] <- m1_auc
+      test_master_list[master_row, 'm2_auc'] <- m2_auc
+      cat('\n \n')
+      try(cat(dynamic_replace(sub_list_tmp$describe, test_master_list[master_row, ])), silent = TRUE)
+      cat('\n \n')
+      if(m1_auc > m2_auc) {
+        cat(dynamic_replace(sub_list_tmp$comment_pass, test_master_list[master_row, ]))
+      } else if(m1_auc < m2_auc) {
+        cat(dynamic_replace(sub_list_tmp$comment_fail, test_master_list[master_row, ]))
+      } else {
+        cat(dynamic_replace(sub_list_tmp$comment_other, test_master_list[master_row, ]))
+      }
+      cat('\n \n')
+      }
+  }
+  
+  
+  if('benchmark_scenario' %in% sub_list$function_name) {
+    master_row <- which(test_master_list$function_name == 'benchmark_scenario')
+    
+    if (length(comma_split(user_input$all_scen_names))== 0){
+        msg = paste0("Please select at least one value for \"all_scen_names\" in user input, otherwise disable \"Benchmark Analysis (Scenario Prediction)\"")
+        write(msg, ERR, append = FALSE)
+        stop(msg, call. = FALSE)
+    }
+    
+    test_master_list[master_row, 'scen1'] <- comma_split(user_input$all_scen_names)[1]
+    sub_list_tmp <- dplyr:::filter(test_master_list, function_name == "benchmark_scenario")
+    cat('\n \n')
+    try(cat(dynamic_replace(sub_list_tmp$describe, test_master_list[master_row, ])), silent = TRUE)
+    cat('\n \n')
+    out1 <- sensitivity(s11, type_names="coef", calc_names="multiply", method_names = c("model_index"),  # yhat or model_index
+                        scen_names = comma_split(user_input$all_scen_names)[1], shocks = 0)
+    out2 <- sensitivity(s22, type_names="coef", calc_names="multiply", method_names = c("model_index"),  # yhat or model_index
+                        scen_names = comma_split(user_input$all_scen_names)[1], shocks = 0)
+    out1 <- dplyr:::select(out1, rownames, values)
+    out2 <- dplyr:::select(out2, rownames, values)
+    out1 <- out1[!duplicated(out1), ]
+    out2 <- out2[!duplicated(out2), ]
+    out_merged <- merge.data.frame(out1, out2, by = 'rownames')[1:min(nrow(out1), user_input$scen_num_quarters, na.rm = TRUE), ]
+    colnames(out_merged) <- c('Date', 'Champion', 'Benchmark')
+    try(cat(pander(out_merged)), silent = TRUE)
+  }
+  
+
+}
+
+
+```
+
+
+
+```{r backtesting, echo=FALSE, results='asis'}
+cat('###', '4.6 Back-test', '\n')
+
+sub_list <- test_master_list %>% filter(function_name == "backtesting")
+
+if(nrow(sub_list) == 1) {
+  if (s11_back$model_type == "logistic")
+    out <- backtesting_qtr_logistic(s11_back) # WS: added to enable roc curve and AUC value
+  else
+    out <- backtesting_qtr(s11_back)
+  # helper function to insert output back into master file
+  master_row <- which(test_master_list$function_name == sub_list$function_name)
+  for(k in 1:length(out)) test_master_list[master_row, names(out[k])] <- paste0(unlist(out[k]), collapse = " ")
+  cat('\n \n')
+  try(cat(dynamic_replace(sub_list$describe, test_master_list[master_row, ])), silent = TRUE)
+  cat('\n \n')
+  try(cat(pander(out$table)), silent = TRUE)
+  cat('\n \n')
+  try(if(user_input$backtest_num_quarters > 0) cat(dynamic_replace(sub_list$comment_pass, test_master_list[master_row, ])) 
+      else cat(dynamic_replace(sub_list$comment_fail, test_master_list[master_row, ])), silent = TRUE)
+  cat('\n \n')
+} else {
+  cat('\n', 'Backtesting was not selected or is (currently) unavailable for this model!', '\n')
+}
+
+```
+
+
+
+```{r diagnostic_tests, echo=FALSE, results='asis'}
+cat('###', '4.7 Model Diagnostic Testing', '\n')
+
+tmp_s11 <- s11
+if(s11$model_type == 'ecm') tmp_s11$model <- s11$model$Final_Model # need to do this for ecm to work with diagnostic tests
+
+for(i in 1:length(test_types)) {
+  # get each test category
+  sub_list <- test_master_list %>% 
+    filter_(paste0(s11$model_type, ' == 1'), paste0('type == \'', test_types[i], '\''))
+  
+  
+  # if tests are applicable to this method, run them and output the subsection heading
+  if(nrow(sub_list) > 0) {
+    try(cat(test_types[i]), silent = TRUE)
+    cat('\n \n')
+    for(j in 1:nrow(sub_list)) {
+
+      out <- tryCatch(eval(parse(text = paste0(sub_list$function_name[j], '(tmp_s11, significance = ', 
+                                               sub_list$significance[j], ')'))), error = function(e) NULL)
+
+      if(!is.null(out)) {
+        # helper function to insert output back into master file
+        master_row <- which(test_master_list$function_name == sub_list$function_name[j])
+        try(for(k in 1:length(out)) test_master_list[master_row, names(out[k])] <- paste0(unlist(out[k]), collapse = " "))
+        cat('\n \n')
+        try(cat(out$test_name), silent = TRUE)
+        cat('\n \n')
+        try(cat(dynamic_replace(sub_list$describe[j], test_master_list[master_row, ])), silent = TRUE)
+        cat('\n \n')
+        try(cat(pander(out$table)), silent = TRUE)
+        cat('\n \n')
+        try(if(out$comment_logic_pass == TRUE) cat(dynamic_replace(sub_list$comment_pass[j], test_master_list[master_row, ])), silent = TRUE)
+        try(if(out$comment_logic_pass2 == TRUE) cat(dynamic_replace(sub_list$comment_pass2[j], test_master_list[master_row, ])), silent = TRUE)
+        try(if(out$comment_logic_fail == TRUE) cat(dynamic_replace(sub_list$comment_fail[j], test_master_list[master_row, ])), silent = TRUE)
+        try(if(out$comment_logic_fail2 == TRUE) cat(dynamic_replace(sub_list$comment_fail2[j], test_master_list[master_row, ])), silent = TRUE)
+        try(if(out$comment_logic_other == TRUE) cat(dynamic_replace(sub_list$comment_other[j], test_master_list[master_row, ])), silent = TRUE)
+        cat('\n \n')
+      }
+    }
+  }
+}
+
+# output updated master file
+write.csv(test_master_list, file = OUTPUT_MASTER_FILE)
+
+cat('#', '5 Use Guidelines & Limitations', '\n')
+cat('###', '5.1 Settings and Parameters', '\n')
+cat('###', '5.2 User Overrides', '\n')
+cat('###', '5.3 Model Risks and Limitations', '\n')
+cat('###', '5.4 Model Owners Model Risk Assessment', '\n')
+
+
+cat('#', '6 Model Controls', '\n')
+cat('###', '6.1 Model Change Control', '\n')
+cat('###', '6.2 Ongoing Monitoring of the Model', '\n')
+
+cat('#', '7 Appendix', '\n')
+cat('###', '7.1 Action Log', '\n')
+cat('###', '7.2 Model Code', '\n')
+
+
+```
+
